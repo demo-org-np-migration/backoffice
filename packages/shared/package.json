@@ -1,0 +1,21 @@
+{
+  "name": "@backoffice/shared",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tipos y clientes HTTP compartidos entre backoffice-api y (a futuro) backoffice-ui.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@cauri/commons": "github:demo-org-np-migration/cauri-commons-js#v1.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
