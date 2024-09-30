@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backoffice-api-config
+  namespace: staging
+  labels:
+    app.kubernetes.io/name: backoffice-api
+    app.kubernetes.io/part-of: cauri
+    cauri.io/team: core-banking
+data:
+  SERVICE_NAME: "backoffice-api"
+  ENV: "staging"
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  KEYCLOAK_ISSUER: "http://keycloak.platform.svc:8080/realms/cauri-staging"
+  KEYCLOAK_CLIENT_ID: "backoffice-api"
+  LEDGER_CORE_URL: "http://ledger-core.staging.svc:8080"
+  KYC_SERVICE_URL: "http://kyc-service.staging.svc:8080"
+  ACCOUNTS_API_URL: "http://accounts-api.staging.svc:8080"

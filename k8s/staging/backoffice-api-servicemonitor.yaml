@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backoffice-api
+  namespace: staging
+  labels:
+    app.kubernetes.io/name: backoffice-api
+    app.kubernetes.io/part-of: cauri
+    cauri.io/team: core-banking
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backoffice-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

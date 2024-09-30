@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backoffice-api
+  namespace: staging
+  labels:
+    app.kubernetes.io/name: backoffice-api
+    app.kubernetes.io/part-of: cauri
+    cauri.io/team: core-banking
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backoffice-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backoffice-api
+        app.kubernetes.io/part-of: cauri
+        cauri.io/team: core-banking
+    spec:
+      containers:
+        - name: backoffice-api
+          image: ghcr.io/demo-org-np-migration/backoffice-api:IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: backoffice-api-config
+          env:
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-client-backoffice-api
+                  key: client_secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
