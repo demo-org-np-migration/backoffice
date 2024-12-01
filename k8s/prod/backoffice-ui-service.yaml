@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backoffice-ui
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: backoffice-ui
+    app.kubernetes.io/part-of: cauri
+    cauri.io/team: core-banking
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: backoffice-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
