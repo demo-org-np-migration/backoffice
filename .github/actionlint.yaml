@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # gh-runner registrado a nivel org (las convenciones internas de API), lo usan todos los
+  # deploy.yml de estilo A para staging y prod.
+  labels:
+    - cauri-k8s
