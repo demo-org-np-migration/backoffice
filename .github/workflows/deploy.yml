@@ -8,6 +8,10 @@ on:
 env:
   REGISTRY: ghcr.io/demo-org-np-migration
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
