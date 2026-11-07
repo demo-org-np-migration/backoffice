@@ -1,6 +1,14 @@
 name: deploy
 
+# nullplatform (modo delegado): cada push construye las dos imágenes del monorepo y registra cada una en su aplicación de
+# nullplatform (backoffice-api y backoffice-ui: build, asset, release), pero ya no despliega. El deploy se pide en
+# nullplatform: pasa por su checklist y nullplatform dispara este workflow (repository_dispatch nullplatform-deploy) con
+# el entorno, el componente y el tag. El runner y los comandos de deploy son los de siempre.
+run-name: ${{ github.event_name == 'repository_dispatch' && format('nullplatform deploy {0} · {1} · {2} · {3}', github.event.client_payload.deployment_id, github.event.client_payload.component, github.event.client_payload.environment, github.event.client_payload.image_tag) || format('build {0}', github.ref_name) }}
+
 on:
+  repository_dispatch:
+    types: [nullplatform-deploy]
   workflow_dispatch:
   push:
     branches: [main]
@@ -15,14 +23,30 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name != 'repository_dispatch'
     runs-on: ubuntu-latest
+    env:
+      NULLPLATFORM_API_KEY: ${{ secrets.NULLPLATFORM_API_KEY }}
     strategy:
       matrix:
         app: [backoffice-api, backoffice-ui]
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      # nullplatform: cada pata registra el build en SU aplicación (monorepo: --path apps/<app>).
+      - name: nullplatform - install CLI
+        continue-on-error: true
+        run: |
+          curl -fsSL https://cli.nullplatform.com/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: nullplatform - build start
+        id: np_build
+        continue-on-error: true
+        run: |
+          np build start --path "apps/${{ matrix.app }}" --format json > np-build.json
+          echo "id=$(jq -r '.id // empty' np-build.json)" >> "$GITHUB_OUTPUT"
+          echo "application_id=$(jq -r '.application_id // empty' np-build.json)" >> "$GITHUB_OUTPUT"
 
       - name: Compute image tag
         id: tag
@@ -42,6 +66,7 @@ jobs:
       # backoffice-api declara el mismo ARG como no-op para que este step
       # sirva para las dos patas del matrix sin bifurcar el workflow.
       - name: Build and push (sha tag)
+        id: push
         uses: docker/build-push-action@v6
         with:
           platforms: linux/amd64,linux/arm64
@@ -53,6 +78,7 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ matrix.app }}:${{ steps.tag.outputs.tag }}
 
       - name: Build and push (semver tag)
+        id: push_semver
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/build-push-action@v6
         with:
@@ -64,38 +90,84 @@ jobs:
             VITE_KEYCLOAK_REALM=cauri-prod
           tags: ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.ref_name }}
 
-  deploy-staging:
-    needs: build
+      # nullplatform: los assets. backoffice-api: una imagen ("main"). backoffice-ui lleva el realm adentro: la del tag sha
+      # es la de staging ("staging") y la del tag v* la de prod ("prod"); cada scope elige la suya por asset_name, y una
+      # release de main (sin imagen de prod) no se puede desplegar en prod.
+      - name: nullplatform - assets
+        if: steps.np_build.outputs.id != ''
+        continue-on-error: true
+        env:
+          APP: ${{ matrix.app }}
+          BUILD_ID: ${{ steps.np_build.outputs.id }}
+          APP_ID: ${{ steps.np_build.outputs.application_id }}
+          SHA_URL: ${{ env.REGISTRY }}/${{ matrix.app }}:${{ steps.tag.outputs.tag }}
+          SHA_DIGEST: ${{ steps.push.outputs.digest }}
+          V_URL: ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.ref_name }}
+          V_DIGEST: ${{ steps.push_semver.outputs.digest }}
+        run: |
+          asset() { jq -nc --argjson b "$BUILD_ID" --argjson a "$APP_ID" --arg n "$1" --arg u "$2" --arg d "$3" \
+            '{build_id: $b, application_id: $a, name: $n, type: "docker-image", url: $u, metadata: {digest: $d}}' > asset.json
+            np asset create --body asset.json; }
+          if [[ "$APP" == backoffice-ui ]]; then
+            asset staging "$SHA_URL" "$SHA_DIGEST"
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then asset prod "$V_URL" "$V_DIGEST"; fi
+          else
+            asset main "$SHA_URL" "$SHA_DIGEST"
+          fi
+
+      - name: nullplatform - build status
+        if: always() && steps.np_build.outputs.id != ''
+        continue-on-error: true
+        run: np build update --id "${{ steps.np_build.outputs.id }}" --status "${{ job.status == 'success' && 'successful' || 'failed' }}"
+
+      - name: nullplatform - release
+        if: success() && steps.np_build.outputs.id != ''
+        continue-on-error: true
+        env:
+          BUILD_ID: ${{ steps.np_build.outputs.id }}
+          APP_ID: ${{ steps.np_build.outputs.application_id }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          RUN: ${{ github.run_number }}
+        run: |
+          umask 077
+          token=$(jq -nc '{api_key: env.NULLPLATFORM_API_KEY}' | curl -sf https://api.nullplatform.com/token -H 'Content-Type: application/json' --data-binary @- | jq -r .access_token)
+          printf 'Authorization: Bearer %s\n' "$token" > np-auth.hdr
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            semver="${GITHUB_REF_NAME#v}"
+          else
+            next=$(curl -sf "https://api.nullplatform.com/release?application_id=$APP_ID&limit=200" -H @np-auth.hdr |
+              jq -r '[.results[].semver | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | split(".") | map(tonumber)] | sort | (last // [0,0,0]) | "\(.[0]).\(.[1]).\(.[2]+1)"')
+            semver="$next-$RUN.sha.${TAG#sha-}"
+          fi
+          jq -nc --argjson b "$BUILD_ID" --argjson a "$APP_ID" --arg s "$semver" '{application_id: $a, build_id: $b, semver: $s, status: "active"}' |
+            curl -sf -X POST https://api.nullplatform.com/release -H @np-auth.hdr -H 'Content-Type: application/json' --data-binary @- | jq -c '{id, semver}'
+          rm -f np-auth.hdr
+
+  # nullplatform pide el deploy (repository_dispatch) de UN componente en UN entorno con la release que aprobó su
+  # checklist. Mismo runner y mismos manifiestos de siempre. El payload entra por variables de entorno y se valida.
+  nullplatform-deploy:
+    if: github.event_name == 'repository_dispatch'
     runs-on: [self-hosted, cauri-k8s]
-    strategy:
-      matrix:
-        app: [backoffice-api, backoffice-ui]
+    environment: ${{ github.event.client_payload.environment == 'prod' && 'production' || 'staging' }}
+    concurrency:
+      group: deploy-${{ github.event.client_payload.component }}-${{ github.event.client_payload.environment }}
+      cancel-in-progress: false
+    env:
+      NP_ENV: ${{ github.event.client_payload.environment }}
+      NP_TAG: ${{ github.event.client_payload.image_tag }}
+      NP_APP: ${{ github.event.client_payload.component }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply staging manifests
+      - name: Validar el pedido de nullplatform
         run: |
-          # Ojo: sed-concatenar varios YAML sin "---" entre archivos y
-          # pasarlos juntos por stdin hace que kubectl los vea como un solo
-          # documento fusionado y aplique nada más que el último recurso
-          # (silencioso, sin error) — por eso van uno por uno.
-          for f in "k8s/staging/${{ matrix.app }}-"*.yaml; do
-            sed "s/IMAGE_TAG/${{ needs.build.outputs.tag }}/" "$f" | kubectl apply -n staging -f -
-          done
+          [[ "$NP_ENV" =~ ^(staging|prod)$ ]] || { echo "entorno inválido: $NP_ENV"; exit 1; }
+          [[ "$NP_APP" =~ ^(backoffice-api|backoffice-ui)$ ]] || { echo "componente inválido: $NP_APP"; exit 1; }
+          [[ "$NP_TAG" =~ ^(sha-[0-9a-f]{7}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "tag inválido: $NP_TAG"; exit 1; }
 
-  deploy-prod:
-    needs: [build, deploy-staging]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: [self-hosted, cauri-k8s]
-    environment: production
-    strategy:
-      matrix:
-        app: [backoffice-api, backoffice-ui]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Apply prod manifests
+      - name: kubectl apply
         run: |
-          for f in "k8s/prod/${{ matrix.app }}-"*.yaml; do
-            sed "s/IMAGE_TAG/${{ github.ref_name }}/" "$f" | kubectl apply -n prod -f -
+          # Uno por uno: concatenarlos sin "---" hace que kubectl aplique solo el último recurso.
+          for f in k8s/"$NP_ENV"/"$NP_APP"-*.yaml; do
+            sed "s/IMAGE_TAG/$NP_TAG/" "$f" | kubectl apply -n "$NP_ENV" -f -
           done
